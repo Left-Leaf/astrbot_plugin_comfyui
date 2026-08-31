@@ -1,6 +1,17 @@
-name: helloworld # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
-display_name: helloworld # 用于展示的名字，可以是方便人类阅读的名字（需要版本 >= v4.5.0，低版本不会报错，请放心填写）
-desc: AstrBot 插件示例。 # 插件简短描述
-version: v1.3.0 # 插件版本号。格式：v1.1.1 或者 v1.1
-author: Soulter # 作者
-repo: https://github.com/Soulter/helloworld # 插件的仓库地址
+name: astrbot_plugin_comfyui # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
+display_name: ComfyUI文生图 # 用于展示的名字，可以是方便人类阅读的名字（需要版本 >= v4.5.0，低版本不会报错，请放心填写）
+short_desc: 群内一句话生成 Anima3 风格图片（ComfyUI）
+desc: |
+  基于 anima3-prompt skill 的 ComfyUI Anima3 文生图插件。
+  两阶段 LLM 提示词生成（技能路由 + 提示词生成），自动注入质量前缀，
+  支持多工作流管理（/workflow list|use|show）。
+  需要本地部署 ComfyUI 服务（默认 http://127.0.0.1:8188）。
+version: 1.1.0 # 插件版本号（遵循语义化版本规范）
+author: Left-Leaf # 作者
+repo: https://github.com/Left-Leaf/astrbot_plugin_comfyui # 插件的仓库地址
+astrbot_version: ">=4.5.0" # 支持的 AstrBot 版本范围
+social_link: https://github.com/Left-Leaf
+tags: # 标签列表，用于插件市场分类和搜索
+  - comfyui
+  - 文生图
+  - 绘画

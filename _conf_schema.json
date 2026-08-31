@@ -1,0 +1,26 @@
+{
+  "comfyui_server_url": {
+    "type": "string",
+    "default": "http://127.0.0.1:8188",
+    "name": "ComfyUI 服务地址",
+    "description": "ComfyUI 的 HTTP API 地址，例如 http://127.0.0.1:8188"
+  },
+  "prompt_node_id": {
+    "type": "string",
+    "default": "6",
+    "name": "正向提示词节点 ID（兜底）",
+    "description": "工作流未标记 _meta.is_positive_prompt 时，写入正向提示词的节点 ID（CLIPTextEncode 的 text 输入）"
+  },
+  "timeout": {
+    "type": "int",
+    "default": 300,
+    "name": "生成超时（秒）",
+    "description": "等待 ComfyUI 完成生成的最长时间"
+  },
+  "llm_provider_id": {
+    "type": "string",
+    "default": "",
+    "name": "LLM Provider ID",
+    "description": "用于生成提示词的模型 Provider ID；留空则使用当前会话的对话模型"
+  }
+}

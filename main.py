@@ -19,7 +19,6 @@ from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.event.filter import EventMessageType
 from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import Reply
 from astrbot.core.star.filter.command import GreedyStr
@@ -160,25 +159,24 @@ class ComfyUIPlugin(Star):
         async for res in self._generate_and_reply(event, user_request):
             yield res
 
-    @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
-    @filter.event_message_type(EventMessageType.PRIVATE_MESSAGE)
-    async def on_message(self, event: AstrMessageEvent):
-        """回复改图：回复机器人发过的生图结果，发送「改图 <描述>」来修改图片。
+    @filter.command("改图")
+    async def modify_image(self, event: AstrMessageEvent, prompt: GreedyStr):
+        """回复改图：回复机器人发过的生图结果，并发送 /改图 <描述> 来修改图片。
 
-        仅当被回复的消息是本插件之前生成并保存过提示词的结果时才会触发；
-        其余回复一律忽略，避免误吞普通聊天。
+        仅当被回复的消息是本插件之前生成并保存过提示词的结果时才会触发。
         """
         reply = self._find_reply_component(event)
         if reply is None:
+            yield event.plain_result(
+                "用法：请先回复要修改的生图结果，再发送 /改图 <修改描述>\n"
+                "例如：回复某张图后发送 /改图 换成红色背景"
+            )
             return
-        text = (event.message_str or "").strip()
-        if not text:
-            return
-        for kw in ("改图", "修改", "重画", "换一个"):
-            if text.startswith(kw):
-                modify_desc = text[len(kw):].strip()
-                break
-        else:
+        modify_desc = str(prompt).strip()
+        if not modify_desc:
+            yield event.plain_result(
+                "用法：/改图 <修改描述>\n例如：/改图 换成红色背景，添加雨天"
+            )
             return
 
         # 按被回复消息的 ID 查找保存过的提示词。
@@ -193,7 +191,7 @@ class ComfyUIPlugin(Star):
         base_prompt = record["prompt"]
         async for res in self._generate_and_reply(
             event,
-            modify_desc or "保持原图主体，整体优化细节与清晰度",
+            modify_desc,
             base_prompt=base_prompt,
         ):
             yield res
@@ -259,11 +257,18 @@ class ComfyUIPlugin(Star):
             save_dir = Path(get_astrbot_data_path()) / "temp" / self.plugin_name
             for image_info in images:
                 path = await client.download_image(image_info, save_dir)
-                # 作为对触发消息的回复发出：前置 Reply 组件引用原消息。
+                # 作为对触发消息的回复发出：前置 Reply 组件引用原消息，并 @ 发送者。
                 result = event.make_result()
                 try:
                     result.chain.append(
                         Reply(id=event.message_obj.message_id)
+                    )
+                except Exception:
+                    pass
+                try:
+                    result.at(
+                        name=event.get_sender_name(),
+                        qq=event.get_sender_id(),
                     )
                 except Exception:
                     pass

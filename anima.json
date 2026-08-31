@@ -1,0 +1,196 @@
+{
+  "1": {
+    "inputs": {
+      "unet_name": "Anima-2.9B-preview-v1.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "2": {
+    "inputs": {
+      "clip_name": "qwen_3_06b_base.safetensors",
+      "type": "stable_diffusion",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "3": {
+    "inputs": {
+      "lora_list_json": "[{\"name\":\"anima-turbo-lora-v0.2.safetensors\",\"strength_model\":1,\"enabled\":true}]",
+      "anima_lora_control:anima-turbo-lora-v0.2.safetensors": true,
+      "   Strength": 1,
+      "打开 LoRA 选择器": null,
+      "model": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "AnimaMultiLoraLoader",
+    "_meta": {
+      "title": "Anima 多 LoRA 加载器"
+    }
+  },
+  "4": {
+    "inputs": {
+      "text": "score_1, score_2, score_3,bad anatomy, bad proportions, deformed anatomy, deformed face, deformed eyes, text, multiple fingers, watermark, logo, copyright_notice, company_name,",
+      "clip": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "5": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "6": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码",
+      "is_positive_prompt": true
+    }
+  },
+  "7": {
+    "inputs": {
+      "value": 1920
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "INT Constant"
+    }
+  },
+  "8": {
+    "inputs": {
+      "value": 1128
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "INT Constant"
+    }
+  },
+  "9": {
+    "inputs": {
+      "width": [
+        "7",
+        0
+      ],
+      "height": [
+        "8",
+        0
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像"
+    }
+  },
+  "10": {
+    "inputs": {
+      "mask": "dave_alpha.npz",
+      "strength": 0.3,
+      "tau": 0.1,
+      "model": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "AnimaDAVE",
+    "_meta": {
+      "title": "Anima DAVE (after compile)"
+    }
+  },
+  "11": {
+    "inputs": {
+      "seed": 76686836537793,
+      "steps": 12,
+      "cfg": 1,
+      "sampler_name": "er_sde",
+      "scheduler": "beta",
+      "denoise": 1,
+      "model": [
+        "10",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "4",
+        0
+      ],
+      "latent_image": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "12": {
+    "inputs": {
+      "samples": [
+        "11",
+        0
+      ],
+      "vae": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "13": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "14": {
+    "inputs": {
+      "anything": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "清理显存占用"
+    }
+  }
+}

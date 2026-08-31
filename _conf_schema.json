@@ -22,5 +22,11 @@
     "default": "",
     "name": "LLM Provider ID",
     "description": "用于生成提示词的模型 Provider ID；留空则使用当前会话的对话模型"
+  },
+  "enable_character_search": {
+    "type": "bool",
+    "default": true,
+    "name": "IP 角色形象联网查证",
+    "description": "请求涉及知名 IP 角色时，通过 AstrBot 联网搜索查证角色形象（需在 AstrBot 中启用联网搜索并配置对应服务商），保证出图与角色形象一致"
   }
 }

@@ -150,7 +150,12 @@ class ComfyUIPlugin(Star):
         try:
             provider_id = await self._resolve_provider_id(event)
             positive_prompt = await self.prompt_gen.generate(
-                provider_id, user_request
+                provider_id,
+                user_request,
+                event=event,
+                enable_character_search=bool(
+                    self._cfg("enable_character_search", True)
+                ),
             )
             self.logger.info(f"Anima3 正向提示词: {positive_prompt}")
 

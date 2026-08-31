@@ -24,6 +24,17 @@ import re
 from pathlib import Path
 
 from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent
+from astrbot.core.astr_agent_context import AgentContextWrapper, AstrAgentContext
+from astrbot.core.tools.web_search_tools import (
+    AnySearchWebSearchTool,
+    BaiduWebSearchTool,
+    BochaWebSearchTool,
+    BraveWebSearchTool,
+    ExaWebSearchTool,
+    FirecrawlWebSearchTool,
+    TavilyWebSearchTool,
+)
 
 # Catalog of available reference files, mirroring SKILL.md §0.
 REFERENCE_CATALOG: dict[str, str] = {
@@ -60,6 +71,19 @@ DEFAULT_REFERENCES: list[str] = [
     "detail-mood.md",
 ]
 
+# Map AstrBot websearch_provider values to their builtin search tool classes.
+# Only classes that accept a ``query`` kwarg and return the standard
+# ``_search_result_payload`` JSON are used for character verification.
+WEBSEARCH_PROVIDER_TOOL_CLS: dict[str, type] = {
+    "tavily": TavilyWebSearchTool,
+    "bocha": BochaWebSearchTool,
+    "brave": BraveWebSearchTool,
+    "firecrawl": FirecrawlWebSearchTool,
+    "baidu_ai_search": BaiduWebSearchTool,
+    "exa": ExaWebSearchTool,
+    "anysearch": AnySearchWebSearchTool,
+}
+
 
 class AnimaPromptGenerator:
     """Loads the anima3-prompt skill and turns a request into an Anima3 prompt.
@@ -81,16 +105,38 @@ class AnimaPromptGenerator:
         except OSError:
             return ""
 
-    async def generate(self, provider_id: str, user_request: str) -> str:
+    async def generate(
+        self,
+        provider_id: str,
+        user_request: str,
+        event: AstrMessageEvent | None = None,
+        enable_character_search: bool = True,
+    ) -> str:
         """Generate the Anima3 positive prompt for ``user_request``.
+
+        When ``event`` is provided and the request references a well-known IP
+        character (e.g. a specific anime/game character), a web search is
+        performed via AstrBot's builtin search tool to verify the character's
+        appearance, and the snippets are injected into the generation context
+        so the rendered image matches the character's canonical look.
 
         Args:
             provider_id: The LLM provider id to use.
             user_request: The user's image description.
+            event: The message event, used to look up the current web search
+                configuration. When None, character verification is skipped.
+            enable_character_search: Whether to attempt the character
+                verification web search at all.
 
         Returns:
             The generated positive prompt (single line of English tags).
         """
+        character_context = ""
+        if enable_character_search and event is not None:
+            character_context = await self._gather_character_context(
+                provider_id, user_request, event
+            )
+
         if not self.skill_md:
             # Skill missing: fall back to a plain, generic instruction so the
             # plugin still works.
@@ -100,6 +146,13 @@ class AnimaPromptGenerator:
                 "prompt for the Anima3 image model. Output only the prompt text, "
                 "no explanations, no markdown."
             )
+            if character_context:
+                system_prompt += (
+                    "\n\n"
+                    "Reference material about the character's appearance (use it "
+                    "to keep the prompt faithful to the canonical design):\n\n"
+                    f"{character_context}"
+                )
             return await self._call_llm(provider_id, system_prompt, user_request)
 
         references = await self._route_references(provider_id, user_request)
@@ -108,6 +161,15 @@ class AnimaPromptGenerator:
             f"{self.skill_md}\n\n"
             f"# 本次已加载的参考标签库\n\n{references_text}"
         )
+        if character_context:
+            system_prompt += (
+                "\n\n"
+                "# 角色形象查证资料（来自联网搜索）\n\n"
+                "用户请求中涉及知名 IP 角色。以下为联网搜索到的该角色形象资料，"
+                "请务必据此忠实刻画角色的外貌特征（发型、发色、瞳色、服装、标志性"
+                "元素等），不要凭空臆造与角色形象不符的细节：\n\n"
+                f"{character_context}"
+            )
         raw = await self._call_llm(provider_id, system_prompt, user_request)
         return self._clean_prompt(raw)
 
@@ -118,6 +180,137 @@ class AnimaPromptGenerator:
             system_prompt=system_prompt,
         )
         return (resp.completion_text or "").strip()
+
+    async def _gather_character_context(
+        self,
+        provider_id: str,
+        user_request: str,
+        event: AstrMessageEvent,
+    ) -> str:
+        """Detect a well-known IP character and collect its appearance info.
+
+        First asks the LLM whether ``user_request`` references a specific known
+        character (e.g. an anime/game character). If yes, runs a web search via
+        AstrBot's configured search provider and returns the formatted snippets
+        for injection into the generation context. Any failure degrades to an
+        empty string so the pipeline never breaks.
+
+        Args:
+            provider_id: The LLM provider id to use for the detection call.
+            user_request: The user's image description.
+            event: The message event used to resolve the search configuration.
+
+        Returns:
+            A formatted block of character appearance notes, or "" when no
+            character is referenced or the search could not be completed.
+        """
+        character = await self._detect_character(provider_id, user_request)
+        if not character:
+            return ""
+        snippets = await self._search_character(character, event)
+        if not snippets:
+            return ""
+        return f"角色：{character}\n{snippets}"
+
+    async def _detect_character(self, provider_id: str, user_request: str) -> str:
+        """Ask the LLM if the request references a specific known character.
+
+        Args:
+            provider_id: The LLM provider id to use.
+            user_request: The user's image description.
+
+        Returns:
+            The detected character name, or "" when none is referenced.
+        """
+        system_prompt = (
+            "判断用户的生图请求是否明确指向某个具体的知名 IP 角色（动漫、游戏、"
+            "影视等作品中的角色，例如「雷电将军」「初音未来」「白起」）。\n"
+            "若明确指向某知名角色，仅输出该角色名称（保持原文，不加引号、不加"
+            "其他内容）；\n"
+            "若只是泛指的人物、职业、路人，或无法确定具体角色，输出空字符串。\n"
+            "只允许输出角色名或空字符串，不要输出任何解释。"
+        )
+        try:
+            name = await self._call_llm(provider_id, system_prompt, user_request)
+            return name.strip().strip('"')
+        except Exception as e:
+            logger.warning(f"Anima 角色识别失败: {e}")
+            return ""
+
+    async def _search_character(self, character: str, event: AstrMessageEvent) -> str:
+        """Search the character's appearance via AstrBot's builtin search tool.
+
+        Resolves the user's configured ``websearch_provider`` and calls the
+        matching builtin search tool with a query targeting the character's
+        appearance. Returns a flat list of result titles + snippets.
+
+        Args:
+            character: The character name to search for.
+            event: The message event used to look up provider settings.
+
+        Returns:
+            Formatted search snippets, or "" when search is disabled/unavailable.
+        """
+        try:
+            cfg = self.context.get_config(umo=event.unified_msg_origin)
+            provider_settings = cfg.get("provider_settings", {}) or {}
+        except Exception as e:
+            logger.warning(f"Anima 读取联网搜索配置失败: {e}")
+            return ""
+
+        if not provider_settings.get("web_search", False):
+            return ""
+
+        provider = provider_settings.get("websearch_provider", "tavily")
+        tool_cls = WEBSEARCH_PROVIDER_TOOL_CLS.get(provider)
+        if tool_cls is None:
+            logger.warning(f"Anima 不支持的联网搜索服务: {provider}")
+            return ""
+
+        try:
+            tool = self.context.get_llm_tool_manager().get_builtin_tool(tool_cls)
+            agent_ctx = AstrAgentContext(context=self.context, event=event)
+            run_ctx = AgentContextWrapper(context=agent_ctx)
+            query = (
+                f"{character} 角色 外貌 形象 发型 发色 瞳色 服装 设定 "
+                f"{character} character appearance design"
+            )
+            result = await tool.call(
+                run_ctx, query=query, max_results=5, count=5, top_k=5, limit=5
+            )
+            return self._parse_search_payload(result)
+        except Exception as e:
+            logger.warning(f"Anima 角色形象联网搜索失败: {e}")
+            return ""
+
+    @staticmethod
+    def _parse_search_payload(result: object) -> str:
+        """Extract title/snippet lines from a search tool's JSON payload.
+
+        Args:
+            result: The ``ToolExecResult`` returned by a builtin search tool,
+                normally a JSON string of ``{"results": [{title, snippet, ...}]}``.
+
+        Returns:
+            A newline-joined list of "title: snippet" lines, or "" when empty.
+        """
+        text = result if isinstance(result, str) else str(result or "")
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return ""
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            return ""
+        lines = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            snippet = str(item.get("snippet") or "").strip()
+            if title or snippet:
+                lines.append(f"- {title}: {snippet}")
+        return "\n".join(lines)
 
     async def _route_references(self, provider_id: str, user_request: str) -> list[str]:
         """Ask the LLM which reference files the request needs."""

@@ -25,16 +25,6 @@ from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
-from astrbot.core.astr_agent_context import AgentContextWrapper, AstrAgentContext
-from astrbot.core.tools.web_search_tools import (
-    AnySearchWebSearchTool,
-    BaiduWebSearchTool,
-    BochaWebSearchTool,
-    BraveWebSearchTool,
-    ExaWebSearchTool,
-    FirecrawlWebSearchTool,
-    TavilyWebSearchTool,
-)
 
 # Catalog of available reference files, mirroring SKILL.md §0.
 REFERENCE_CATALOG: dict[str, str] = {
@@ -71,18 +61,34 @@ DEFAULT_REFERENCES: list[str] = [
     "detail-mood.md",
 ]
 
-# Map AstrBot websearch_provider values to their builtin search tool classes.
-# Only classes that accept a ``query`` kwarg and return the standard
-# ``_search_result_payload`` JSON are used for character verification.
-WEBSEARCH_PROVIDER_TOOL_CLS: dict[str, type] = {
-    "tavily": TavilyWebSearchTool,
-    "bocha": BochaWebSearchTool,
-    "brave": BraveWebSearchTool,
-    "firecrawl": FirecrawlWebSearchTool,
-    "baidu_ai_search": BaiduWebSearchTool,
-    "exa": ExaWebSearchTool,
-    "anysearch": AnySearchWebSearchTool,
+# Map AstrBot websearch_provider values to builtin search tool *names*.
+# Tools are looked up by name at call time so the plugin keeps working even on
+# AstrBot releases that do not ship every search provider's tool class.
+WEBSEARCH_PROVIDER_TOOL_NAME: dict[str, str] = {
+    "tavily": "web_search_tavily",
+    "bocha": "web_search_bocha",
+    "brave": "web_search_brave",
+    "firecrawl": "web_search_firecrawl",
+    "baidu_ai_search": "web_search_baidu",
+    "exa": "web_search_exa",
+    "anysearch": "web_search_anysearch",
 }
+
+
+class _AgentRunContext:
+    """Minimal stand-in for AstrBot's ``AstrAgentContext``/``AgentContextWrapper``.
+
+    The builtin search tools only read ``context.context`` (the plugin Context)
+    and ``context.event`` (the message event) from their run context, so a tiny
+    structural stand-in is enough and avoids importing AstrBot-internal classes
+    that differ across versions.
+    """
+
+    __slots__ = ("context", "event")
+
+    def __init__(self, context, event=None) -> None:
+        self.context = context
+        self.event = event
 
 
 class AnimaPromptGenerator:
@@ -262,15 +268,15 @@ class AnimaPromptGenerator:
             return ""
 
         provider = provider_settings.get("websearch_provider", "tavily")
-        tool_cls = WEBSEARCH_PROVIDER_TOOL_CLS.get(provider)
-        if tool_cls is None:
+        tool_name = WEBSEARCH_PROVIDER_TOOL_NAME.get(provider)
+        if tool_name is None:
             logger.warning(f"Anima 不支持的联网搜索服务: {provider}")
             return ""
 
         try:
-            tool = self.context.get_llm_tool_manager().get_builtin_tool(tool_cls)
-            agent_ctx = AstrAgentContext(context=self.context, event=event)
-            run_ctx = AgentContextWrapper(context=agent_ctx)
+            tool = self.context.get_llm_tool_manager().get_builtin_tool(tool_name)
+            agent_ctx = _AgentRunContext(context=self.context, event=event)
+            run_ctx = _AgentRunContext(context=agent_ctx)
             query = (
                 f"{character} 角色 外貌 形象 发型 发色 瞳色 服装 设定 "
                 f"{character} character appearance design"

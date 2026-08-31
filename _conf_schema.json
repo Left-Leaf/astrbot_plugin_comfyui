@@ -17,6 +17,12 @@
     "name": "生成超时（秒）",
     "description": "等待 ComfyUI 完成生成的最长时间"
   },
+  "sampler_steps": {
+    "type": "int",
+    "default": 12,
+    "name": "采样步数 steps",
+    "description": "KSampler 的采样步数。默认 12（Anima turbo 推荐）；若图片清晰度低、噪声多，可调高到 20~28 获得更细腻的结果（生成时间相应增加）"
+  },
   "llm_provider_id": {
     "type": "string",
     "default": "",

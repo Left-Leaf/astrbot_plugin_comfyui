@@ -157,9 +157,13 @@ class ComfyUIPlugin(Star):
                     self._cfg("enable_character_search", True)
                 ),
             )
-            self.logger.info(f"Anima3 正向提示词: {positive_prompt}")
+            self.logger.info(f"Anima3 内容提示词: {positive_prompt}")
 
             workflow = self._build_workflow(positive_prompt)
+            # 记录注入质量前缀后的完整提示词，便于核对出图质量配置。
+            prompt_node_id = self._find_prompt_node(workflow)
+            full_prompt = workflow[prompt_node_id]["inputs"]["text"]
+            self.logger.info(f"Anima3 提交 ComfyUI 的完整提示词: {full_prompt}")
 
             client = ComfyUIClient(
                 str(self._cfg("comfyui_server_url", "http://127.0.0.1:8188"))
@@ -253,10 +257,12 @@ class ComfyUIPlugin(Star):
         workflow[prompt_node_id]["inputs"]["text"] = (
             f"{QUALITY_PREFIX}, {positive_prompt}"
         )
-        # 每次生成使用随机种子，避免固定种子导致图片完全一致。
+        # 每次生成使用随机种子，避免固定种子导致图片完全一致；同时应用
+        # 可配置的采样步数（默认 12，调高可提升清晰度、减少噪声）。
         for node in workflow.values():
             if node.get("class_type") == "KSampler":
                 node["inputs"]["seed"] = random.randrange(1 << 63)
+                node["inputs"]["steps"] = int(self._cfg("sampler_steps", 12))
         return workflow
 
     async def _resolve_provider_id(self, event: AstrMessageEvent) -> str:

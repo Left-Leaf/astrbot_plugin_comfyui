@@ -15,6 +15,7 @@ import json
 import random
 import time
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from astrbot.api import logger
@@ -35,8 +36,32 @@ QUALITY_PREFIX = (
     "masterpiece, best quality, score_7, score_9, very aesthetic, ultra detailed"
 )
 
-# 改图历史最多保留的条数。
+# 生图任务历史最多保留的条数。
 PROMPT_HISTORY_MAX = 30
+
+
+@dataclass
+class ImageGenTask:
+    """One image generation task (both /comfyui and /改图 create one).
+
+    A task is created when the user invokes a command, records the triggering
+    message, then is progressively filled in as generation proceeds:
+
+    - ``trigger_message_id`` / ``trigger_text`` — set at task creation time
+      (the user's command message).
+    - ``prompt`` / ``full_prompt`` — written once the LLM finishes building the
+      positive prompt.
+    - ``result_path`` — written after the generated image is saved and sent.
+
+    Tasks are keyed by ``trigger_message_id`` and capped at 30 entries.
+    """
+
+    trigger_message_id: str
+    trigger_text: str = ""
+    prompt: str = ""
+    full_prompt: str = ""
+    result_path: str = ""
+    ts: float = field(default_factory=time.time)
 
 
 @register(PLUGIN_NAME, "Left-Leaf", "ComfyUI 文生图插件（Anima3）", "1.1.0")
@@ -57,9 +82,9 @@ class ComfyUIPlugin(Star):
         self.active_workflow_path = self.plugin_data_path / "active_workflow.json"
         self.skill_dir = Path(__file__).parent / "skills" / "anima3-prompt"
         self.prompt_gen = AnimaPromptGenerator(context, self.skill_dir)
-        # 生图历史：message_id -> {prompt, full_prompt, user_request, ts}。
-        # 用于「回复改图」——用户回复某条生图结果时按消息 ID 找到原提示词。
-        self._prompt_history: OrderedDict[str, dict] = OrderedDict()
+        # 生图任务历史：trigger_message_id -> ImageGenTask。用于「回复改图」——
+        # 用户回复某条生图结果时，通过回复链回溯到触发消息 ID 找到对应任务。
+        self._task_history: OrderedDict[str, ImageGenTask] = OrderedDict()
 
     def _cfg(self, key: str, default):
         """Read a plugin config value, tolerating both dict and AstrBotConfig."""
@@ -179,20 +204,19 @@ class ComfyUIPlugin(Star):
             )
             return
 
-        # 按被回复消息的 ID 查找保存过的提示词。
-        record = self._get_prompt_record(reply.id)
-        if record is None:
+        # 按被回复消息找到对应的原生图任务；改图本身会创建一次新任务。
+        source = self._find_task(reply)
+        if source is None or not source.prompt:
             yield event.plain_result(
                 "只能修改本机器人最近生成的图片（超出最近 30 张的历史无法修改）。"
             )
             return
 
         yield event.plain_result("正在根据原提示词和你新的要求修改，请稍候...")
-        base_prompt = record["prompt"]
         async for res in self._generate_and_reply(
             event,
             modify_desc,
-            base_prompt=base_prompt,
+            base_prompt=source.prompt,
         ):
             yield res
 
@@ -202,7 +226,13 @@ class ComfyUIPlugin(Star):
         user_request: str,
         base_prompt: str = "",
     ):
-        """Generate an image, send it as a reply, and store its prompt history.
+        """Create an image task, generate, and send the image as a reply.
+
+        This is used by both ``/comfyui`` (fresh task) and ``/改图`` (new task
+        that reuses an earlier prompt as its base). The task is created up
+        front with the trigger-message info, then progressively filled: prompt
+        once the LLM output is ready, and the result path after the image is
+        saved.
 
         Args:
             event: The triggering message event; the image is sent as a reply
@@ -215,6 +245,11 @@ class ComfyUIPlugin(Star):
         Yields:
             The reply result carrying the generated image.
         """
+        # 1. 创建任务封装，写入触发消息信息。
+        task = self._create_task(
+            str(event.message_obj.message_id),
+            trigger_text=user_request,
+        )
         try:
             provider_id = await self._resolve_provider_id(event)
             positive_prompt = await self.prompt_gen.generate(
@@ -234,6 +269,10 @@ class ComfyUIPlugin(Star):
             full_prompt = workflow[prompt_node_id]["inputs"]["text"]
             self.logger.info(f"Anima3 提交 ComfyUI 的完整提示词: {full_prompt}")
 
+            # 2. 提示词生成完成，写入任务。
+            task.prompt = positive_prompt
+            task.full_prompt = full_prompt
+
             client = ComfyUIClient(
                 str(self._cfg("comfyui_server_url", "http://127.0.0.1:8188"))
             )
@@ -243,20 +282,12 @@ class ComfyUIPlugin(Star):
                 timeout=int(self._cfg("timeout", 300)),
             )
 
-            # 保存本次结果的提示词历史，供「回复改图」使用。
-            try:
-                self._store_prompt_record(
-                    str(event.message_obj.message_id),
-                    prompt=positive_prompt,
-                    full_prompt=full_prompt,
-                    user_request=user_request,
-                )
-            except Exception as e:
-                self.logger.warning(f"保存提示词历史失败: {e}")
-
             save_dir = Path(get_astrbot_data_path()) / "temp" / self.plugin_name
             for image_info in images:
                 path = await client.download_image(image_info, save_dir)
+                # 3. 结果图片保存后写入任务。
+                if not task.result_path:
+                    task.result_path = str(path)
                 # 作为对触发消息的回复发出：前置 Reply 组件引用原消息，并 @ 发送者。
                 result = event.make_result()
                 try:
@@ -278,34 +309,54 @@ class ComfyUIPlugin(Star):
             self.logger.error(f"Anima3 生图失败: {e}", exc_info=True)
             yield event.plain_result(f"生图失败：{e}")
 
-    def _store_prompt_record(self, message_id: str, **fields) -> None:
-        """Store a generation record keyed by message id, capped at 30 entries.
-
-        The oldest entry is evicted when the history exceeds
-        ``PROMPT_HISTORY_MAX``.
+    def _create_task(self, trigger_message_id: str, trigger_text: str = "") -> ImageGenTask:
+        """Create a new task, store it, and evict the oldest when over the cap.
 
         Args:
-            message_id: The message id of the generated image result.
-            **fields: Record fields (prompt, full_prompt, user_request, ts).
-        """
-        fields.setdefault("ts", time.time())
-        self._prompt_history[message_id] = fields
-        self._prompt_history.move_to_end(message_id)
-        while len(self._prompt_history) > PROMPT_HISTORY_MAX:
-            self._prompt_history.popitem(last=False)
-
-    def _get_prompt_record(self, message_id) -> dict | None:
-        """Look up a stored generation record by message id.
-
-        Args:
-            message_id: The referenced message id from a Reply component.
+            trigger_message_id: The id of the user's command message.
+            trigger_text: The user's request text (optional).
 
         Returns:
-            The stored record dict, or None when not found.
+            The newly created and stored task.
         """
-        if message_id is None:
+        task = ImageGenTask(
+            trigger_message_id=trigger_message_id,
+            trigger_text=trigger_text,
+        )
+        self._task_history[trigger_message_id] = task
+        self._task_history.move_to_end(trigger_message_id)
+        while len(self._task_history) > PROMPT_HISTORY_MAX:
+            self._task_history.popitem(last=False)
+        return task
+
+    def _find_task(self, reply: Reply) -> ImageGenTask | None:
+        """Look up the task referenced by a Reply component.
+
+        The user replies to the *image* message, whose id differs from the
+        *command* message id we key the history by. The image message itself
+        carries a nested ``Reply`` back to the command message, so we search
+        both the direct reply id and any nested reply ids inside its chain.
+
+        Args:
+            reply: The Reply component from the user's modify request.
+
+        Returns:
+            The matching task, or None when not found.
+        """
+        if reply is None:
             return None
-        return self._prompt_history.get(str(message_id))
+        # 先查用户直接回复的消息 id（图片消息），再查其内部嵌套引用的
+        # 命令消息 id（机器人发的图片消息本身回复了命令消息）。
+        candidate_ids: list[str | int] = [reply.id]
+        if reply.chain:
+            candidate_ids += [
+                comp.id for comp in reply.chain if isinstance(comp, Reply)
+            ]
+        for mid in candidate_ids:
+            task = self._task_history.get(str(mid))
+            if task is not None:
+                return task
+        return None
 
     @staticmethod
     def _find_reply_component(event: AstrMessageEvent) -> Reply | None:

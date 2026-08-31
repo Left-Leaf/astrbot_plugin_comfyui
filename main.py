@@ -13,11 +13,15 @@ from __future__ import annotations
 
 import json
 import random
+import time
+from collections import OrderedDict
 from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event.filter import EventMessageType
 from astrbot.api.star import Context, Star, register
+from astrbot.core.message.components import Reply
 from astrbot.core.star.filter.command import GreedyStr
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
@@ -31,6 +35,9 @@ PLUGIN_NAME = "astrbot_plugin_comfyui"
 QUALITY_PREFIX = (
     "masterpiece, best quality, score_7, score_9, very aesthetic, ultra detailed"
 )
+
+# 改图历史最多保留的条数。
+PROMPT_HISTORY_MAX = 30
 
 
 @register(PLUGIN_NAME, "Left-Leaf", "ComfyUI 文生图插件（Anima3）", "1.1.0")
@@ -51,6 +58,9 @@ class ComfyUIPlugin(Star):
         self.active_workflow_path = self.plugin_data_path / "active_workflow.json"
         self.skill_dir = Path(__file__).parent / "skills" / "anima3-prompt"
         self.prompt_gen = AnimaPromptGenerator(context, self.skill_dir)
+        # 生图历史：message_id -> {prompt, full_prompt, user_request, ts}。
+        # 用于「回复改图」——用户回复某条生图结果时按消息 ID 找到原提示词。
+        self._prompt_history: OrderedDict[str, dict] = OrderedDict()
 
     def _cfg(self, key: str, default):
         """Read a plugin config value, tolerating both dict and AstrBotConfig."""
@@ -147,6 +157,66 @@ class ComfyUIPlugin(Star):
             f"正在使用工作流 {self._get_active_workflow()} 生成图片，请稍候..."
         )
 
+        async for res in self._generate_and_reply(event, user_request):
+            yield res
+
+    @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
+    @filter.event_message_type(EventMessageType.PRIVATE_MESSAGE)
+    async def on_message(self, event: AstrMessageEvent):
+        """回复改图：回复机器人发过的生图结果，发送「改图 <描述>」来修改图片。
+
+        仅当被回复的消息是本插件之前生成并保存过提示词的结果时才会触发；
+        其余回复一律忽略，避免误吞普通聊天。
+        """
+        reply = self._find_reply_component(event)
+        if reply is None:
+            return
+        text = (event.message_str or "").strip()
+        if not text:
+            return
+        for kw in ("改图", "修改", "重画", "换一个"):
+            if text.startswith(kw):
+                modify_desc = text[len(kw):].strip()
+                break
+        else:
+            return
+
+        # 按被回复消息的 ID 查找保存过的提示词。
+        record = self._get_prompt_record(reply.id)
+        if record is None:
+            yield event.plain_result(
+                "只能修改本机器人最近生成的图片（超出最近 30 张的历史无法修改）。"
+            )
+            return
+
+        yield event.plain_result("正在根据原提示词和你新的要求修改，请稍候...")
+        base_prompt = record["prompt"]
+        async for res in self._generate_and_reply(
+            event,
+            modify_desc or "保持原图主体，整体优化细节与清晰度",
+            base_prompt=base_prompt,
+        ):
+            yield res
+
+    async def _generate_and_reply(
+        self,
+        event: AstrMessageEvent,
+        user_request: str,
+        base_prompt: str = "",
+    ):
+        """Generate an image, send it as a reply, and store its prompt history.
+
+        Args:
+            event: The triggering message event; the image is sent as a reply
+                to this message.
+            user_request: The user's image description.
+            base_prompt: Optional existing positive prompt to modify (用于改图)。
+                When given, the LLM rewrites this prompt instead of building a
+                fresh one.
+
+        Yields:
+            The reply result carrying the generated image.
+        """
         try:
             provider_id = await self._resolve_provider_id(event)
             positive_prompt = await self.prompt_gen.generate(
@@ -156,6 +226,7 @@ class ComfyUIPlugin(Star):
                 enable_character_search=bool(
                     self._cfg("enable_character_search", True)
                 ),
+                base_prompt=base_prompt,
             )
             self.logger.info(f"Anima3 内容提示词: {positive_prompt}")
 
@@ -174,13 +245,77 @@ class ComfyUIPlugin(Star):
                 timeout=int(self._cfg("timeout", 300)),
             )
 
+            # 保存本次结果的提示词历史，供「回复改图」使用。
+            try:
+                self._store_prompt_record(
+                    str(event.message_obj.message_id),
+                    prompt=positive_prompt,
+                    full_prompt=full_prompt,
+                    user_request=user_request,
+                )
+            except Exception as e:
+                self.logger.warning(f"保存提示词历史失败: {e}")
+
             save_dir = Path(get_astrbot_data_path()) / "temp" / self.plugin_name
             for image_info in images:
                 path = await client.download_image(image_info, save_dir)
-                yield event.image_result(str(path))
+                # 作为对触发消息的回复发出：前置 Reply 组件引用原消息。
+                result = event.make_result()
+                try:
+                    result.chain.append(
+                        Reply(id=event.message_obj.message_id)
+                    )
+                except Exception:
+                    pass
+                result.file_image(str(path))
+                yield result
         except Exception as e:
             self.logger.error(f"Anima3 生图失败: {e}", exc_info=True)
             yield event.plain_result(f"生图失败：{e}")
+
+    def _store_prompt_record(self, message_id: str, **fields) -> None:
+        """Store a generation record keyed by message id, capped at 30 entries.
+
+        The oldest entry is evicted when the history exceeds
+        ``PROMPT_HISTORY_MAX``.
+
+        Args:
+            message_id: The message id of the generated image result.
+            **fields: Record fields (prompt, full_prompt, user_request, ts).
+        """
+        fields.setdefault("ts", time.time())
+        self._prompt_history[message_id] = fields
+        self._prompt_history.move_to_end(message_id)
+        while len(self._prompt_history) > PROMPT_HISTORY_MAX:
+            self._prompt_history.popitem(last=False)
+
+    def _get_prompt_record(self, message_id) -> dict | None:
+        """Look up a stored generation record by message id.
+
+        Args:
+            message_id: The referenced message id from a Reply component.
+
+        Returns:
+            The stored record dict, or None when not found.
+        """
+        if message_id is None:
+            return None
+        return self._prompt_history.get(str(message_id))
+
+    @staticmethod
+    def _find_reply_component(event: AstrMessageEvent) -> Reply | None:
+        """Return the first Reply component of the message, if any.
+
+        Args:
+            event: The message event to inspect.
+
+        Returns:
+            The Reply component, or None when the message is not a reply.
+        """
+        for comp in event.message_obj.message:
+            if isinstance(comp, Reply):
+                return comp
+        return None
 
     @filter.command_group("workflow")
     def workflow_group(self):
@@ -240,7 +375,14 @@ class ComfyUIPlugin(Star):
         )
 
     def _build_workflow(self, positive_prompt: str) -> dict:
-        """载入当前激活的工作流，注入正向提示词并为 KSampler 随机化种子。"""
+        """载入当前激活的工作流，注入正向提示词并为 KSampler 随机化种子。
+
+        Args:
+            positive_prompt: The content prompt to inject.
+
+        Returns:
+            The API-format workflow dict.
+        """
         workflow_path = self._resolve_workflow_path()
         if not workflow_path.exists():
             raise FileNotFoundError(

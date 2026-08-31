@@ -181,6 +181,7 @@ class AnimaPromptGenerator:
         user_request: str,
         event: AstrMessageEvent | None = None,
         enable_character_search: bool = True,
+        base_prompt: str = "",
     ) -> str:
         """Generate the Anima3 positive prompt for ``user_request``.
 
@@ -198,10 +199,22 @@ class AnimaPromptGenerator:
                 configuration. When None, character verification is skipped.
             enable_character_search: Whether to hand the web search tool to the
                 agent at all.
+            base_prompt: Optional existing positive prompt to modify (用于改图).
+                When given, the LLM rewrites this prompt according to
+                ``user_request`` instead of building one from scratch.
 
         Returns:
             The generated positive prompt (single line of English tags).
         """
+        if base_prompt:
+            # 改图模式：基于原提示词 + 用户新要求重新构建提示词。
+            system_prompt = self._build_modify_system_prompt(base_prompt)
+            safety_on = self._is_safety_mode_on(event)
+            return await self._generate_with_tools(
+                provider_id, system_prompt, user_request, event,
+                enable_character_search, safety_on=safety_on,
+            )
+
         if not self.skill_md:
             # Skill missing: fall back to a plain, generic instruction so the
             # plugin still works.
@@ -229,6 +242,26 @@ class AnimaPromptGenerator:
         return await self._generate_with_tools(
             provider_id, system_prompt, user_request, event,
             enable_character_search, safety_on=safety_on,
+        )
+
+    def _build_modify_system_prompt(self, base_prompt: str) -> str:
+        """Build the system prompt for modifying an existing prompt.
+
+        Args:
+            base_prompt: The original positive prompt to modify.
+
+        Returns:
+            A system prompt instructing the LLM to rewrite ``base_prompt``.
+        """
+        return (
+            "You are an expert anime illustration prompt engineer. "
+            "Below is an existing Anima3 positive prompt (comma-separated "
+            "English tags):\n\n"
+            f"{base_prompt}\n\n"
+            "The user wants to modify this image. Rewrite the prompt to apply "
+            "their requested changes while keeping the unchanged subject and "
+            "scene consistent. Output ONLY the new single-line English prompt, "
+            "no explanations, no markdown."
         )
 
     async def _generate_with_tools(

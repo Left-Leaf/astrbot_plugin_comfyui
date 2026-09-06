@@ -211,8 +211,12 @@ class AnimaPromptGenerator:
             system_prompt = self._build_modify_system_prompt(base_prompt)
             safety_on = self._is_safety_mode_on(event)
             return await self._generate_with_tools(
-                provider_id, system_prompt, user_request, event,
-                enable_character_search, safety_on=safety_on,
+                provider_id,
+                system_prompt,
+                user_request,
+                event,
+                enable_character_search,
+                safety_on=safety_on,
             )
 
         if not self.skill_md:
@@ -226,8 +230,12 @@ class AnimaPromptGenerator:
             )
             safety_on = self._is_safety_mode_on(event)
             return await self._generate_with_tools(
-                provider_id, system_prompt, user_request, event,
-                enable_character_search, safety_on=safety_on,
+                provider_id,
+                system_prompt,
+                user_request,
+                event,
+                enable_character_search,
+                safety_on=safety_on,
             )
 
         safety_on = self._is_safety_mode_on(event)
@@ -236,12 +244,15 @@ class AnimaPromptGenerator:
         )
         references_text = self._load_references(references)
         system_prompt = (
-            f"{self.skill_md}\n\n"
-            f"# 本次已加载的参考标签库\n\n{references_text}"
+            f"{self.skill_md}\n\n# 本次已加载的参考标签库\n\n{references_text}"
         )
         return await self._generate_with_tools(
-            provider_id, system_prompt, user_request, event,
-            enable_character_search, safety_on=safety_on,
+            provider_id,
+            system_prompt,
+            user_request,
+            event,
+            enable_character_search,
+            safety_on=safety_on,
         )
 
     def _build_modify_system_prompt(self, base_prompt: str) -> str:
@@ -303,9 +314,11 @@ class AnimaPromptGenerator:
                 f"\n\n{system_prompt}"
             )
 
-        search_toolset = self._build_search_toolset(event) if (
-            enable_character_search and event is not None
-        ) else None
+        search_toolset = (
+            self._build_search_toolset(event)
+            if (enable_character_search and event is not None)
+            else None
+        )
 
         if search_toolset is None or search_toolset.empty():
             raw = await self._call_llm(provider_id, system_prompt, user_request)
@@ -465,9 +478,7 @@ class AnimaPromptGenerator:
             for name, purpose in REFERENCE_CATALOG.items()
             if not (safety_on and name in SAFETY_BLOCKED_REFERENCES)
         ]
-        catalog = "\n".join(
-            f"- {name}: {purpose}" for name, purpose in catalog_items
-        )
+        catalog = "\n".join(f"- {name}: {purpose}" for name, purpose in catalog_items)
         system_prompt = (
             f"{self.skill_md}\n\n"
             "# 加载规划任务\n\n"

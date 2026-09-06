@@ -136,3 +136,158 @@ class ComfyUIClient:
             resp.raise_for_status()
             save_path.write_bytes(resp.content)
         return save_path
+
+
+class RunningHubError(RuntimeError):
+    """Raised when a RunningHub API call fails or reports an error."""
+
+
+# 轮询 /task/openapi/outputs 时，处于排队/运行中的任务会以非零 code + 这些
+# 关键字的 msg 返回；据此与真正的错误区分开。
+_RUNNINGHUB_PENDING_TOKENS = ("QUEUED", "RUNNING", "排队", "运行中")
+
+
+class RunningHubClient:
+    """Minimal async client for the RunningHub (cloud ComfyUI) HTTP API.
+
+    Runs workflows that already exist in a user's RunningHub account,
+    identified by their numeric ``webappId``. Only field overrides are sent;
+    the workflow itself lives on RunningHub and must have been run at least
+    once on the web before it can be invoked via API.
+
+    Args:
+        api_key: The RunningHub API key.
+        base_url: RunningHub base URL (default ``https://www.runninghub.cn``).
+    """
+
+    def __init__(
+        self, api_key: str, base_url: str = "https://www.runninghub.cn"
+    ) -> None:
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+
+    async def get_node_info(self, webapp_id: int) -> list[dict]:
+        """Fetch the modifiable nodes of a RunningHub workflow.
+
+        Args:
+            webapp_id: The numeric RunningHub workflow (webapp) id.
+
+        Returns:
+            A list of node dicts with ``nodeId``/``nodeName``/``fieldName``/
+            ``fieldValue``/``fieldType``/``description``.
+
+        Raises:
+            RunningHubError: When the API errors or no modifiable nodes exist.
+        """
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.get(
+                f"{self.base_url}/api/webapp/apiCallDemo",
+                params={"apiKey": self.api_key, "webappId": webapp_id},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        if data.get("code") != 0:
+            raise RunningHubError(f"获取工作流节点信息失败: {data.get('msg', data)}")
+        nodes = (data.get("data") or {}).get("nodeInfoList", [])
+        if not nodes:
+            raise RunningHubError(
+                "该工作流没有可修改的节点。请先在 RunningHub 网页上成功运行一次，"
+                "之后才能通过 API 调用。"
+            )
+        return nodes
+
+    async def submit(self, webapp_id: int, node_info_list: list[dict]) -> str:
+        """Submit a workflow run with field overrides; returns the task id.
+
+        Args:
+            webapp_id: The numeric RunningHub workflow (webapp) id.
+            node_info_list: Overrides as ``{"nodeId", "fieldName", "fieldValue"}``.
+
+        Returns:
+            The generated ``taskId``.
+
+        Raises:
+            RunningHubError: When the API rejects the submission.
+        """
+        payload = {
+            "workflowId": int(webapp_id),
+            "apiKey": self.api_key,
+            "nodeInfoList": node_info_list,
+        }
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{self.base_url}/task/openapi/create", json=payload
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        if data.get("code") != 0:
+            raise RunningHubError(f"提交工作流失败: {data.get('msg', data)}")
+        task_id = (data.get("data") or {}).get("taskId")
+        if not task_id:
+            raise RunningHubError(f"提交成功但未返回 taskId: {data}")
+        return str(task_id)
+
+    async def wait_for_completion(
+        self, task_id: str, timeout: int = 300, poll_interval: float = 5.0
+    ) -> list[str]:
+        """Poll ``/task/openapi/outputs`` until the task finishes.
+
+        Args:
+            task_id: The task id returned by :meth:`submit`.
+            timeout: Maximum time in seconds to wait.
+            poll_interval: Seconds between polls.
+
+        Returns:
+            A list of output image URLs (directly downloadable).
+
+        Raises:
+            RunningHubError: When the workflow errors out or produces no images.
+            TimeoutError: When generation exceeds ``timeout`` seconds.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        async with httpx.AsyncClient(timeout=60) as client:
+            while True:
+                resp = await client.post(
+                    f"{self.base_url}/task/openapi/outputs",
+                    json={"taskId": task_id, "apiKey": self.api_key},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("code") == 0:
+                    outputs = data.get("data") or []
+                    urls = [o["fileUrl"] for o in outputs if o.get("fileUrl")]
+                    if urls:
+                        return urls
+                    raise RunningHubError("工作流完成，但未产出图片。")
+                msg = str(data.get("msg", ""))
+                is_pending = any(
+                    token in msg or token.upper() in msg.upper()
+                    for token in _RUNNINGHUB_PENDING_TOKENS
+                )
+                if not is_pending:
+                    raise RunningHubError(f"工作流执行出错: {data}")
+                if loop.time() >= deadline:
+                    raise TimeoutError(f"RunningHub 生成超时（{timeout} 秒）。")
+                await asyncio.sleep(poll_interval)
+
+    async def download_image(self, url: str, save_dir: Path) -> Path:
+        """Download an image URL to ``save_dir`` and return its local path.
+
+        Args:
+            url: The direct image URL from :meth:`wait_for_completion`.
+            save_dir: Directory to save the image into.
+
+        Returns:
+            The local path of the downloaded image.
+        """
+        name = url.split("?")[0].rsplit("/", 1)[-1] or "image.png"
+        if "." not in name:
+            name += ".png"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        save_path = save_dir / name
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            save_path.write_bytes(resp.content)
+        return save_path

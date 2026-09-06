@@ -68,8 +68,7 @@
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
-      "title": "CLIP文本编码",
-      "is_positive_prompt": true
+      "title": "Prompts"
     }
   },
   "7": {

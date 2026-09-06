@@ -5,11 +5,11 @@
     "name": "ComfyUI 服务地址",
     "description": "ComfyUI 的 HTTP API 地址，例如 http://127.0.0.1:8188"
   },
-  "prompt_node_id": {
+  "workflow_dir": {
     "type": "string",
-    "default": "6",
-    "name": "正向提示词节点 ID（兜底）",
-    "description": "工作流未标记 _meta.is_positive_prompt 时，写入正向提示词的节点 ID（CLIPTextEncode 的 text 输入）"
+    "default": "",
+    "name": "工作流目录",
+    "description": "存放 ComfyUI 工作流 JSON 文件的目录路径。留空则使用插件数据目录下的 workflows/ 子目录"
   },
   "timeout": {
     "type": "int",
@@ -34,5 +34,39 @@
     "default": true,
     "name": "IP 角色形象联网查证",
     "description": "请求涉及知名 IP 角色时，通过 AstrBot 联网搜索查证角色形象（需在 AstrBot 中启用联网搜索并配置对应服务商），保证出图与角色形象一致"
+  },
+  "runninghub_api_key": {
+    "type": "string",
+    "default": "",
+    "name": "RunningHub API Key",
+    "description": "RunningHub（云端 ComfyUI）的 API Key。留空则不启用 RunningHub，仅使用本地 ComfyUI"
+  },
+  "runninghub_base_url": {
+    "type": "string",
+    "default": "https://www.runninghub.cn",
+    "name": "RunningHub 服务地址",
+    "description": "RunningHub API 的基础地址，默认 https://www.runninghub.cn"
+  },
+  "runninghub_prompt_field": {
+    "type": "string",
+    "default": "text",
+    "name": "RunningHub 提示词字段名",
+    "description": "注入正向提示词时匹配的节点字段名（fieldName）。默认 text；若你的工作流有多个同名文本节点，可改为更具体的字段名以精确定位"
+  },
+  "runninghub_workflows": {
+    "type": "list",
+    "default": [],
+    "name": "RunningHub 工作流列表",
+    "description": "登记你在 RunningHub 上上传的工作流，每个元素为「别名 → webappId」键值对。例如：[{\"alias\": \"anima3\", \"workflow_id\": \"1877265245566922800\"}]。这些工作流会出现在 /comfyui workflow list 中并带（RunningHub）后缀",
+    "items": {
+      "alias": {
+        "type": "string",
+        "name": "别名"
+      },
+      "workflow_id": {
+        "type": "string",
+        "name": "工作流 ID (webappId)"
+      }
+    }
   }
 }

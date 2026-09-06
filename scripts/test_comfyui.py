@@ -70,9 +70,7 @@ def build_workflow(workflow_path: Path, positive_prompt: str) -> dict:
             prompt_node_id = str(node_id)
             break
     if prompt_node_id not in workflow:
-        raise RuntimeError(
-            f"工作流中找不到提示词节点 {prompt_node_id}。"
-        )
+        raise RuntimeError(f"工作流中找不到提示词节点 {prompt_node_id}。")
     workflow[prompt_node_id]["inputs"]["text"] = positive_prompt
     for node in workflow.values():
         if node.get("class_type") == "KSampler":
